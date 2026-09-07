@@ -1,0 +1,18 @@
+#compdef work
+
+_work() {
+    _arguments \
+        '1:session or workspace:_work_contexts'
+}
+
+_work_contexts() {
+    local -a contexts
+
+    if (( $+commands[work] )); then
+        contexts=(${(f)"$(work --completion-zsh 2>/dev/null)"})
+    fi
+
+    _describe 'session or workspace' contexts
+}
+
+_work "$@"

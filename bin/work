@@ -1,0 +1,452 @@
+#!/usr/bin/env zsh
+
+set -u
+
+readonly WORK_VERSION="0.1.0"
+
+die() {
+    print -u2 -- "work: $*"
+    return 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+json_value() {
+    python3 -c '
+import json
+import sys
+
+path = sys.argv[1].split(".")
+data = json.load(sys.stdin)
+
+for part in path:
+    if isinstance(data, dict):
+        data = data.get(part)
+    else:
+        data = None
+    if data is None:
+        break
+
+if data is not None:
+    print(data)
+' "$1"
+}
+
+require_command herdr
+require_command python3
+
+get_sessions() {
+    herdr session list --json 2>/dev/null \
+        | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+sessions = data.get("result", {}).get("sessions", [])
+
+for session in sessions:
+    name = session.get("name") or session.get("session_name")
+    if name:
+        print(name)
+'
+}
+
+get_workspaces() {
+    local session="$1"
+
+    HERDR_SESSION="$session" herdr workspace list 2>/dev/null \
+        | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+workspaces = data.get("result", {}).get("workspaces", [])
+
+for workspace in workspaces:
+    workspace_id = workspace.get("workspace_id")
+    label = workspace.get("label")
+
+    if workspace_id and label:
+        print(f"{workspace_id}\t{label}")
+'
+}
+
+session_exists() {
+    local wanted="$1"
+    local session
+
+    while IFS= read -r session; do
+        [[ "$session" == "$wanted" ]] && return 0
+    done < <(get_sessions)
+
+    return 1
+}
+
+workspace_lookup() {
+    local wanted="$1"
+    local session
+    local workspace_id
+    local label
+
+    while IFS= read -r session; do
+        while IFS=$'\t' read -r workspace_id label; do
+            [[ "$label" == "$wanted" ]] || continue
+
+            print -r -- "$session"$'\t'"$workspace_id"$'\t'"$label"
+            return 0
+        done < <(get_workspaces "$session")
+    done < <(get_sessions)
+
+    return 1
+}
+
+similar_names() {
+    local wanted="$1"
+    local names=()
+    local session
+    local workspace_id
+    local label
+
+    while IFS= read -r session; do
+        names+=("$session")
+
+        while IFS=$'\t' read -r workspace_id label; do
+            [[ -n "$label" ]] && names+=("$label")
+        done < <(get_workspaces "$session")
+    done < <(get_sessions)
+
+    python3 - "$wanted" "${names[@]}" <<'PY'
+import difflib
+import sys
+
+wanted = sys.argv[1]
+names = sys.argv[2:]
+
+matches = difflib.get_close_matches(
+    wanted,
+    names,
+    n=5,
+    cutoff=0.45,
+)
+
+for name in matches:
+    print(name)
+PY
+}
+
+attach_session() {
+    local session="$1"
+
+    print "Opening session: $session"
+    exec herdr --session "$session"
+}
+
+focus_workspace() {
+    local session="$1"
+    local workspace_id="$2"
+
+    print "Opening workspace: $3"
+    HERDR_SESSION="$session" herdr workspace focus "$workspace_id" >/dev/null || {
+        die "unable to focus workspace '$3'"
+    }
+
+    exec herdr --session "$session"
+}
+
+create_session() {
+    local name="$1"
+
+    print
+    print "Create session '$name'?"
+    print "  y) Create"
+    print "  n) Cancel"
+    print -n "Choice [y/N]: "
+
+    read -r answer
+
+    case "$answer" in
+        y|Y|yes|YES)
+            exec herdr --session "$name"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+create_workspace() {
+    local label="$1"
+    local session="${2:-}"
+    local cwd="${PWD}"
+
+    if [[ -z "$session" ]]; then
+        local sessions=()
+        local selected
+
+        while IFS= read -r selected; do
+            sessions+=("$selected")
+        done < <(get_sessions)
+
+        if (( ${#sessions[@]} == 0 )); then
+            print
+            print "No Herdr session exists yet."
+            print "Creating a workspace requires a session."
+
+            print
+            print -n "Session name: "
+            read -r session
+
+            [[ -n "$session" ]] || return 0
+
+            exec herdr --session "$session"
+        fi
+
+        print
+        print "Select a session for workspace '$label':"
+
+        local i=1
+        local choice
+
+        for selected in "${sessions[@]}"; do
+            print "  $i) $selected"
+            ((i++))
+        done
+
+        print -n "Choice [1]: "
+        read -r choice
+
+        [[ -z "$choice" ]] && choice=1
+
+        if ! [[ "$choice" =~ '^[0-9]+$' ]] ||
+            (( choice < 1 || choice > ${#sessions[@]} )); then
+            die "invalid session selection"
+        fi
+
+        session="${sessions[$choice]}"
+    fi
+
+    print
+    print "Create workspace:"
+    print "  Session: $session"
+    print "  Label:   $label"
+    print "  CWD:     $cwd"
+    print
+    print -n "Create? [y/N]: "
+
+    local answer
+    read -r answer
+
+    case "$answer" in
+        y|Y|yes|YES)
+            HERDR_SESSION="$session" \
+                herdr workspace create \
+                --cwd "$cwd" \
+                --label "$label" \
+                --focus >/dev/null || {
+                    die "unable to create workspace '$label'"
+                }
+
+            exec herdr --session "$session"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+show_menu() {
+    local sessions=()
+    local session
+    local workspace_id
+    local label
+
+    while IFS= read -r session; do
+        sessions+=("$session")
+    done < <(get_sessions)
+
+    print
+    print "Work"
+    print "────────────────────────────────────────"
+
+    local index=1
+    local -a targets=()
+
+    for session in "${sessions[@]}"; do
+        print "  $index) [session] $session"
+        targets+=("session"$'\t'"$session")
+        ((index++))
+
+        while IFS=$'\t' read -r workspace_id label; do
+            [[ -n "$label" ]] || continue
+
+            print "  $index)   [workspace] $label"
+            targets+=("workspace"$'\t'"$session"$'\t'"$workspace_id"$'\t'"$label")
+            ((index++))
+        done < <(get_workspaces "$session")
+    done
+
+    if (( ${#targets[@]} == 0 )); then
+        print "  No work contexts found."
+        print
+        print -n "Create a session? [y/N]: "
+
+        local answer
+        read -r answer
+
+        case "$answer" in
+            y|Y|yes|YES)
+                print -n "Session name: "
+                read -r session
+
+                [[ -n "$session" ]] && create_session "$session"
+                ;;
+        esac
+
+        return
+    fi
+
+    print
+    print "  q) Quit"
+    print
+    print -n "Select: "
+
+    local choice
+    read -r choice
+
+    [[ "$choice" == "q" || "$choice" == "Q" ]] && return 0
+    [[ "$choice" =~ '^[0-9]+$' ]] || return 0
+
+    (( choice >= 1 && choice <= ${#targets[@]} )) || return 0
+
+    local target="${targets[$choice]}"
+    local type="${target%%$'\t'*}"
+    target="${target#*$'\t'}"
+
+    if [[ "$type" == "session" ]]; then
+        attach_session "$target"
+    fi
+
+    local target_session="${target%%$'\t'*}"
+    target="${target#*$'\t'}"
+
+    local target_workspace_id="${target%%$'\t'*}"
+    local target_label="${target#*$'\t'}"
+
+    focus_workspace \
+        "$target_session" \
+        "$target_workspace_id" \
+        "$target_label"
+}
+
+main() {
+    case "${1:-}" in
+        "")
+            show_menu
+            ;;
+
+        --version|-v)
+            print -- "work $WORK_VERSION"
+            ;;
+
+        --help|-h)
+            cat <<'EOF'
+Usage:
+  work
+  work <session_or_workspace>
+
+Open a Herdr session or workspace.
+
+Behavior:
+  work                    Interactive work context selector
+  work <name>             Open session or workspace named <name>
+
+If <name> does not exist, work shows close matches and offers
+to create a session or workspace.
+
+Options:
+  -h, --help              Show this help
+  -v, --version           Show version
+EOF
+            ;;
+
+        *)
+            local target="$1"
+
+            if session_exists "$target"; then
+                attach_session "$target"
+            fi
+
+            local workspace
+            workspace="$(workspace_lookup "$target")"
+
+            if [[ -n "$workspace" ]]; then
+                local session="${workspace%%$'\t'*}"
+                workspace="${workspace#*$'\t'}"
+
+                local workspace_id="${workspace%%$'\t'*}"
+                local label="${workspace#*$'\t'}"
+
+                focus_workspace "$session" "$workspace_id" "$label"
+            fi
+
+            print
+            print "No session or workspace named '$target'."
+
+            local suggestions=()
+            local suggestion
+
+            while IFS= read -r suggestion; do
+                suggestions+=("$suggestion")
+            done < <(similar_names "$target")
+
+            if (( ${#suggestions[@]} > 0 )); then
+                print
+                print "Did you mean?"
+
+                local i=1
+                for suggestion in "${suggestions[@]}"; do
+                    print "  $i) $suggestion"
+                    ((i++))
+                done
+
+                print
+                print -n "Open one of these? [1-${#suggestions[@]}/n]: "
+
+                local choice
+                read -r choice
+
+                if [[ "$choice" =~ '^[0-9]+$' ]] &&
+                    (( choice >= 1 && choice <= ${#suggestions[@]} )); then
+                    exec "$0" "${suggestions[$choice]}"
+                fi
+            fi
+
+            print
+            print "Create '$target' as:"
+            print "  1) Session"
+            print "  2) Workspace"
+            print "  q) Cancel"
+            print
+            print -n "Choice [q]: "
+
+            local choice
+            read -r choice
+
+            case "$choice" in
+                1)
+                    create_session "$target"
+                    ;;
+                2)
+                    create_workspace "$target"
+                    ;;
+                *)
+                    return 0
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+main "$@"

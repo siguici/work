@@ -1,0 +1,29 @@
+# Operating system
+.DS_Store
+Thumbs.db
+
+# Editors
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+build/
+dist/
+target/
+tmp/
+
+# Test artifacts
+coverage/
+
+# Archives
+*.tar
+*.tar.gz
+*.zip
