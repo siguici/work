@@ -63,7 +63,7 @@ session_exists() {
     local session
 
     while IFS= read -r session; do
-        [[ "$session" == "$wanted" ]] && return 0
+        [[ "${session:l}" == "${wanted:l}" ]] && return 0
     done < <(get_sessions)
 
     return 1
@@ -76,11 +76,15 @@ workspace_lookup() {
     local label
 
     while IFS= read -r session; do
-        while IFS=$'\t' read -r workspace_id label; do
-            [[ "$label" == "$wanted" ]] || continue
+        [[ -n "$session" ]] || continue
 
-            print -r -- "$session"$'\t'"$workspace_id"$'\t'"$label"
-            return 0
+        while IFS=$'\t' read -r workspace_id label; do
+            [[ -n "$label" ]] || continue
+
+            if [[ "${label:l}" == "${wanted:l}" ]]; then
+                print -r -- "$session"$'\t'"$workspace_id"$'\t'"$label"
+                return 0
+            fi
         done < <(get_workspaces "$session")
     done < <(get_sessions)
 
