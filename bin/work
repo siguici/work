@@ -69,9 +69,7 @@ try:
 except Exception:
     sys.exit(0)
 
-workspaces = data.get("result", {}).get("workspaces", [])
-
-for workspace in workspaces:
+for workspace in data.get("result", {}).get("workspaces", []):
     workspace_id = workspace.get("workspace_id")
     label = workspace.get("label")
 
@@ -88,6 +86,22 @@ session_exists() {
         [[ -n "$session" ]] || continue
 
         if [[ "${session:l}" == "${wanted:l}" ]]; then
+            return 0
+        fi
+    done < <(get_sessions)
+
+    return 1
+}
+
+find_session() {
+    local wanted="$1"
+    local session
+
+    while IFS= read -r session; do
+        [[ -n "$session" ]] || continue
+
+        if [[ "${session:l}" == "${wanted:l}" ]]; then
+            print -r -- "$session"
             return 0
         fi
     done < <(get_sessions)
@@ -344,6 +358,8 @@ show_menu() {
     local target_session
     local target_workspace_id
     local target_label
+    local answer
+    local selected
 
     while IFS= read -r session; do
         [[ -n "$session" ]] || continue
@@ -361,7 +377,6 @@ show_menu() {
         print
         print -n "Create a session? [y/N]: "
 
-        local answer
         read -r answer
 
         case "$answer" in
@@ -369,7 +384,6 @@ show_menu() {
                 print
                 print -n "Session name: "
 
-                local selected
                 read -r selected
 
                 [[ -n "$selected" ]] || return 1
@@ -386,7 +400,11 @@ show_menu() {
 
     for session in "${sessions[@]}"; do
         print "  $index) [session] $session"
-        targets+=("session"$'\t'"$session")
+
+        targets+=(
+            "session"$'\t'"$session"
+        )
+
         ((index++))
 
         while IFS=$'\t' read -r workspace_id label; do
@@ -421,13 +439,19 @@ show_menu() {
 
     target="${targets[$choice]}"
 
-    IFS=$'\t' read -r type target_session target_workspace_id target_label <<< "$target"
-
-    case "$type" in
-        session)
+    case "$target" in
+        session$'\t'*)
+            target_session="${target#*$'\t'}"
             attach_session "$target_session"
             ;;
-        workspace)
+        workspace$'\t'*)
+            target="${target#*$'\t'}"
+
+            IFS=$'\t' read -r \
+                target_session \
+                target_workspace_id \
+                target_label <<< "$target"
+
             focus_workspace \
                 "$target_session" \
                 "$target_workspace_id" \
@@ -442,6 +466,7 @@ show_menu() {
 
 open_target() {
     local wanted="$1"
+    local session
     local workspace_result
     local target_session
     local target_workspace_id
@@ -451,17 +476,11 @@ open_target() {
     local choice
     local answer
 
-    if session_exists "$wanted"; then
-        local session
+    session="$(find_session "$wanted" 2>/dev/null)"
 
-        while IFS= read -r session; do
-            [[ -n "$session" ]] || continue
-
-            if [[ "${session:l}" == "${wanted:l}" ]]; then
-                attach_session "$session"
-                return
-            fi
-        done < <(get_sessions)
+    if [[ -n "$session" ]]; then
+        attach_session "$session"
+        return
     fi
 
     workspace_result="$(workspace_lookup "$wanted")"
@@ -587,7 +606,7 @@ main() {
             return 0
             ;;
 
-        --cokpletion-bash)
+        --completion-bash)
             get_completion_contexts
             return 0
             ;;
