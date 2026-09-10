@@ -78,21 +78,6 @@ for workspace in data.get("result", {}).get("workspaces", []):
 '
 }
 
-session_exists() {
-    local wanted="$1"
-    local session
-
-    while IFS= read -r session; do
-        [[ -n "$session" ]] || continue
-
-        if [[ "${session:l}" == "${wanted:l}" ]]; then
-            return 0
-        fi
-    done < <(get_sessions)
-
-    return 1
-}
-
 find_session() {
     local wanted="$1"
     local session
@@ -100,7 +85,7 @@ find_session() {
     while IFS= read -r session; do
         [[ -n "$session" ]] || continue
 
-        if [[ "${session:l}" == "${wanted:l}" ]]; then
+        if [[ "$session" == "$wanted" ]]; then
             print -r -- "$session"
             return 0
         fi
@@ -121,7 +106,7 @@ workspace_lookup() {
         while IFS=$'\t' read -r workspace_id label; do
             [[ -n "$label" ]] || continue
 
-            if [[ "${label:l}" == "${wanted:l}" ]]; then
+            if [[ "$label" == "$wanted" ]]; then
                 print -r -- "$session"$'\t'"$workspace_id"$'\t'"$label"
                 return 0
             fi
@@ -354,7 +339,6 @@ show_menu() {
     local index=1
     local choice
     local target
-    local type
     local target_session
     local target_workspace_id
     local target_label
@@ -575,8 +559,8 @@ Behavior:
 
   work <name>
       Open an exact session first.
-      Otherwise find a workspace with that name.
-      Matching is case-insensitive.
+      Otherwise find a workspace with that exact name.
+      Matching is case-sensitive.
       If nothing matches, suggest similar names and offer creation.
 
 Options:
