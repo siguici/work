@@ -17,8 +17,19 @@ require_command herdr
 require_command python3
 
 get_sessions() {
-    herdr session list --json 2>/dev/null \
-        | python3 -c '
+    local output
+    local exit_code
+
+    output="$(herdr session list --json 2>&1)"
+    exit_code=$?
+
+    if (( exit_code != 0 )); then
+        print -u2 -- "work: unable to list Herdr sessions"
+        print -u2 -- "$output"
+        return "$exit_code"
+    fi
+
+    print -r -- "$output" | python3 -c '
 import json
 import sys
 
@@ -29,6 +40,7 @@ except Exception:
 
 for session in data.get("sessions", []):
     name = session.get("name") or session.get("session_name")
+
     if name:
         print(name)
 '
@@ -36,9 +48,19 @@ for session in data.get("sessions", []):
 
 get_workspaces() {
     local session="$1"
+    local output
+    local exit_code
 
-    herdr --session "$session" workspace list --json 2>/dev/null \
-        | python3 -c '
+    output="$(HERDR_SESSION="$session" herdr workspace list 2>&1)"
+    exit_code=$?
+
+    if (( exit_code != 0 )); then
+        print -u2 -- "work: unable to list workspaces for session '$session'"
+        print -u2 -- "$output"
+        return "$exit_code"
+    fi
+
+    print -r -- "$output" | python3 -c '
 import json
 import sys
 
@@ -63,7 +85,11 @@ session_exists() {
     local session
 
     while IFS= read -r session; do
-        [[ "${session:l}" == "${wanted:l}" ]] && return 0
+        [[ -n "$session" ]] || continue
+
+        if [[ "${session:l}" == "${wanted:l}" ]]; then
+            return 0
+        fi
     done < <(get_sessions)
 
     return 1
@@ -103,6 +129,7 @@ get_completion_contexts() {
 
         while IFS=$'\t' read -r workspace_id label; do
             [[ -n "$label" ]] || continue
+
             print -r -- "$label"
         done < <(get_workspaces "$session")
     done < <(get_sessions)
@@ -122,6 +149,7 @@ similar_names() {
 
         while IFS=$'\t' read -r workspace_id label; do
             [[ -n "$label" ]] || continue
+
             names+=("$label")
         done < <(get_workspaces "$session")
     done < <(get_sessions)
@@ -135,15 +163,24 @@ import sys
 wanted = sys.argv[1]
 names = sys.argv[2:]
 
-matches = difflib.get_close_matches(
-    wanted,
-    names,
-    n=5,
-    cutoff=0.45,
-)
+wanted_lower = wanted.lower()
 
-for name in matches:
-    print(name)
+scored = []
+
+for name in names:
+    score = difflib.SequenceMatcher(
+        None,
+        wanted_lower,
+        name.lower(),
+    ).ratio()
+
+    scored.append((score, name))
+
+scored.sort(key=lambda item: (-item[0], item[1].lower()))
+
+for score, name in scored[:5]:
+    if score >= 0.45:
+        print(name)
 PY
 }
 
@@ -162,13 +199,13 @@ focus_workspace() {
 
     print "Opening workspace: $label"
 
-    herdr --session "$session" \
+    HERDR_SESSION="$session" herdr \
         workspace focus "$workspace_id" >/dev/null || {
         die "unable to focus workspace '$label'"
         return 1
     }
 
-    exec herdr --session "$session"
+    exec env HERDR_SESSION="$session" herdr
 }
 
 create_session() {
@@ -200,9 +237,11 @@ select_session() {
     local session
     local selected
     local choice
+    local i=1
 
     while IFS= read -r session; do
         [[ -n "$session" ]] || continue
+
         sessions+=("$session")
     done < <(get_sessions)
 
@@ -225,8 +264,6 @@ select_session() {
     print
     print "Select a session for workspace '$label':"
     print
-
-    local i=1
 
     for session in "${sessions[@]}"; do
         print "  $i) $session"
@@ -276,7 +313,7 @@ create_workspace() {
 
     case "$answer" in
         y|Y|yes|YES)
-            herdr --session "$session" \
+            HERDR_SESSION="$session" herdr \
                 workspace create \
                 --cwd "$cwd" \
                 --label "$label" \
@@ -286,7 +323,8 @@ create_workspace() {
             }
 
             print "Opening workspace: $label"
-            exec herdr --session "$session"
+
+            exec env HERDR_SESSION="$session" herdr
             ;;
         *)
             return 0
@@ -301,7 +339,6 @@ show_menu() {
     local label
     local index=1
     local choice
-    local answer
     local target
     local type
     local target_session
@@ -310,6 +347,7 @@ show_menu() {
 
     while IFS= read -r session; do
         [[ -n "$session" ]] || continue
+
         sessions+=("$session")
     done < <(get_sessions)
 
@@ -317,11 +355,37 @@ show_menu() {
     print "Work"
     print "────────────────────────────────────────"
 
+    if (( ${#sessions[@]} == 0 )); then
+        print
+        print "No Herdr session exists yet."
+        print
+        print -n "Create a session? [y/N]: "
+
+        local answer
+        read -r answer
+
+        case "$answer" in
+            y|Y|yes|YES)
+                print
+                print -n "Session name: "
+
+                local selected
+                read -r selected
+
+                [[ -n "$selected" ]] || return 1
+
+                exec herdr session attach "$selected"
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    fi
+
     local -a targets=()
 
     for session in "${sessions[@]}"; do
         print "  $index) [session] $session"
-
         targets+=("session"$'\t'"$session")
         ((index++))
 
@@ -338,101 +402,97 @@ show_menu() {
         done < <(get_workspaces "$session")
     done
 
-    if (( ${#targets[@]} == 0 )); then
-        print "  No work contexts found."
-        print
-        print -n "Create a session? [y/N]: "
-
-        read -r answer
-
-        case "$answer" in
-            y|Y|yes|YES)
-                print -n "Session name: "
-                read -r session
-
-                [[ -n "$session" ]] && create_session "$session"
-                ;;
-        esac
-
-        return 0
-    fi
-
     print
-    print "  q) Quit"
-    print
-    print -n "Select: "
+    print -n "Choice [1]: "
 
     read -r choice
 
-    [[ "$choice" == "q" || "$choice" == "Q" ]] && return 0
+    [[ -z "$choice" ]] && choice=1
 
-    [[ "$choice" =~ '^[0-9]+$' ]] || return 0
+    if ! [[ "$choice" =~ '^[0-9]+$' ]]; then
+        die "invalid selection"
+        return 1
+    fi
 
     if (( choice < 1 || choice > ${#targets[@]} )); then
-        return 0
+        die "invalid selection"
+        return 1
     fi
 
     target="${targets[$choice]}"
 
-    type="${target%%$'\t'*}"
-    target="${target#*$'\t'}"
+    IFS=$'\t' read -r type target_session target_workspace_id target_label <<< "$target"
 
-    if [[ "$type" == "session" ]]; then
-        attach_session "$target"
-        return
-    fi
-
-    target_session="${target%%$'\t'*}"
-    target="${target#*$'\t'}"
-
-    target_workspace_id="${target%%$'\t'*}"
-    target_label="${target#*$'\t'}"
-
-    focus_workspace \
-        "$target_session" \
-        "$target_workspace_id" \
-        "$target_label"
+    case "$type" in
+        session)
+            attach_session "$target_session"
+            ;;
+        workspace)
+            focus_workspace \
+                "$target_session" \
+                "$target_workspace_id" \
+                "$target_label"
+            ;;
+        *)
+            die "invalid target"
+            return 1
+            ;;
+    esac
 }
 
 open_target() {
-    local target="$1"
-    local workspace
-    local session
-    local workspace_id
-    local label
+    local wanted="$1"
+    local workspace_result
+    local target_session
+    local target_workspace_id
+    local target_label
+    local suggestions=()
+    local suggestion
+    local choice
+    local answer
 
-    if session_exists "$target"; then
-        attach_session "$target"
-        return
+    if session_exists "$wanted"; then
+        local session
+
+        while IFS= read -r session; do
+            [[ -n "$session" ]] || continue
+
+            if [[ "${session:l}" == "${wanted:l}" ]]; then
+                attach_session "$session"
+                return
+            fi
+        done < <(get_sessions)
     fi
 
-    workspace="$(workspace_lookup "$target")" || workspace=""
+    workspace_result="$(workspace_lookup "$wanted")"
 
-    if [[ -n "$workspace" ]]; then
-        session="${workspace%%$'\t'*}"
-        workspace="${workspace#*$'\t'}"
+    if [[ -n "$workspace_result" ]]; then
+        IFS=$'\t' read -r \
+            target_session \
+            target_workspace_id \
+            target_label <<< "$workspace_result"
 
-        workspace_id="${workspace%%$'\t'*}"
-        label="${workspace#*$'\t'}"
+        focus_workspace \
+            "$target_session" \
+            "$target_workspace_id" \
+            "$target_label"
 
-        focus_workspace "$session" "$workspace_id" "$label"
         return
     fi
 
     print
-    print "No session or workspace named '$target'."
-
-    local suggestions=()
-    local suggestion
+    print "No session or workspace named '$wanted'."
 
     while IFS= read -r suggestion; do
         [[ -n "$suggestion" ]] || continue
+
         suggestions+=("$suggestion")
-    done < <(similar_names "$target")
+    done < <(similar_names "$wanted")
 
     if (( ${#suggestions[@]} > 0 )); then
         print
-        print "Did you mean?"
+        print "Did you mean:"
+        print
 
         local i=1
 
@@ -442,35 +502,38 @@ open_target() {
         done
 
         print
-        print -n "Open one of these? [1-${#suggestions[@]}/n]: "
+        print "  q) Cancel"
+        print
+        print -n "Choice [q]: "
 
-        local choice
         read -r choice
 
         if [[ "$choice" =~ '^[0-9]+$' ]] &&
             (( choice >= 1 && choice <= ${#suggestions[@]} )); then
+
             open_target "${suggestions[$choice]}"
             return
         fi
+
+        [[ "$choice" != "q" && "$choice" != "Q" ]] || return 0
     fi
 
     print
-    print "Create '$target' as:"
+    print "Create '$wanted' as:"
     print "  1) Session"
     print "  2) Workspace"
     print "  q) Cancel"
     print
     print -n "Choice [q]: "
 
-    local choice
-    read -r choice
+    read -r answer
 
-    case "$choice" in
+    case "$answer" in
         1)
-            create_session "$target"
+            create_session "$wanted"
             ;;
         2)
-            create_workspace "$target"
+            create_workspace "$wanted"
             ;;
         *)
             return 0
@@ -482,67 +545,71 @@ show_help() {
     cat <<'EOF'
 Usage:
   work
-  work <session_or_workspace>
+  work <session-or-workspace>
 
-Open a Herdr session or workspace.
+Description:
+  Open a Herdr session or workspace.
 
 Behavior:
-  work                    Interactive work context selector
-  work <name>             Open a session or workspace named <name>
+  work
+      Interactively select a session or workspace.
 
-Resolution:
-  1. Exact session match
-  2. Exact workspace match
-  3. Close-name suggestions
-  4. Create a session or workspace
-
-Sessions take precedence over workspaces when both have
-the same name.
+  work <name>
+      Open an exact session first.
+      Otherwise find a workspace with that name.
+      Matching is case-insensitive.
+      If nothing matches, suggest similar names and offer creation.
 
 Options:
-  -h, --help              Show this help
-  -v, --version           Show version
-      --completion-zsh    Output completion candidates for Zsh
-      --completion-bash   Output completion candidates for Bash
+  --help              Show this help.
+  --version           Show the version.
+  --completion-zsh    Print zsh completion candidates.
+  --completion-bash   Print bash completion candidates.
 EOF
 }
 
 main() {
-    case "${1:-}" in
-        "")
-            show_menu
+    local argument="${1:-}"
+
+    case "$argument" in
+        --help|-h)
+            show_help
+            return 0
             ;;
 
         --version|-v)
-            print -- "work $WORK_VERSION"
-            ;;
-
-        --help|-h)
-            show_help
+            print -- "$WORK_VERSION"
+            return 0
             ;;
 
         --completion-zsh)
             get_completion_contexts
+            return 0
             ;;
 
-        --completion-bash)
+        --cokpletion-bash)
             get_completion_contexts
+            return 0
             ;;
 
         --*)
-            die "unknown option: $1"
+            die "unknown option: $argument"
             return 1
             ;;
-
-        *)
-            if (( $# > 1 )); then
-                die "expected zero or one argument"
-                return 1
-            fi
-
-            open_target "$1"
-            ;;
     esac
+
+    if (( $# > 1 )); then
+        die "too many arguments"
+        print -u2 -- "usage: work [session-or-workspace]"
+        return 1
+    fi
+
+    if (( $# == 0 )); then
+        show_menu
+        return $?
+    fi
+
+    open_target "$1"
 }
 
 main "$@"
